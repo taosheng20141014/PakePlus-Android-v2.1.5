@@ -1,0 +1,108 @@
+version: 2.1
+
+# 定义可复用命令
+commands:
+  install_gradle:
+    steps:
+      - run:
+          name: Grant Gradle execute permission
+          command: chmod +x ./gradlew
+
+jobs:
+  build-android:
+    working_directory: ~/project
+    docker:
+      - image: cimg/android:2024.08  # 内置 JDK17 + Android SDK + 构建环境
+    steps:
+      - checkout
+
+      # 安装依赖工具
+      - run:
+          name: Update apt & install ImageMagick
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y imagemagick
+            convert --version
+
+      # 设置 pnpm
+      - run:
+          name: Install pnpm 10
+          command: |
+            corepack enable
+            corepack prepare pnpm@10 --activate
+            pnpm --version
+
+      # 设置 Node.js 22.14.0
+      - run:
+          name: Setup Node.js 22.14.0
+          command: |
+            nvm install 22.14.0
+            nvm use 22.14.0
+            node --version
+            npm --version
+
+      # 缓存（提升速度）
+      - restore_cache:
+          key: dependency-cache-{{ checksum "pnpm-lock.yaml" }}
+      - restore_cache:
+          key: gradle-cache-{{ checksum "gradle/wrapper/gradle-wrapper.properties" }}
+
+      # 安装项目依赖
+      - run:
+          name: Install project dependencies
+          command: |
+            pnpm install
+            pnpm pp:worker
+
+      # 赋予 Gradle 执行权限
+      - install_gradle
+
+      # 构建 Debug APK
+      - run:
+          name: Build Debug APK
+          command: ./gradlew assembleDebug --no-daemon
+
+      # 保存缓存
+      - save_cache:
+          key: dependency-cache-{{ checksum "pnpm-lock.yaml" }}
+          paths:
+            - node_modules
+      - save_cache:
+          key: gradle-cache-{{ checksum "gradle/wrapper/gradle-wrapper.properties" }}
+          paths:
+            - ~/.gradle
+
+      # 重命名 APK（使用环境变量）
+      - run:
+          name: Rename APK
+          command: |
+            cd app/build/outputs/apk/debug/
+            mv app-debug.apk "${NAME}-v${VERSION}.apk"
+
+      # 上传构建产物（可在 CircleCI 后台下载）
+      - store_artifacts:
+          path: app/build/outputs/apk/debug/
+          destination: apks
+
+      # 创建 GitHub Release 并上传 APK
+      - run:
+          name: Create GitHub Release
+          command: |
+            curl -sL https://github.com/softprops/gh-release/releases/download/v0.10.0/gh-release_0.10.0_linux_amd64.tar.gz | tar xz
+            ./gh-release \
+              --token "${GITHUB_TOKEN}" \
+              --owner "${CIRCLE_PROJECT_USERNAME}" \
+              --repo "${CIRCLE_PROJECT_REPONAME}" \
+              --tag-name "${NAME}" \
+              --name "${NAME} v${VERSION}" \
+              --body "${PUBBODY}" \
+              app/build/outputs/apk/debug/*.apk
+
+# 工作流（可手动触发 + 可自动触发）
+workflows:
+  android-build:
+    jobs:
+      - build-android:
+          filters:
+            tags:
+              only: /.*/
